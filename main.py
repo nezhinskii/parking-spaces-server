@@ -12,6 +12,7 @@ import json
 import cv2
 import time
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 app = FastAPI()
 model = YOLO('weights/v8.pt')
@@ -61,22 +62,55 @@ connections: Dict[str, WsClient] = {}
 
 fps = 1
 time_per_frame = 1.0 / fps
-executor = ThreadPoolExecutor(max_workers=2)
+executor = ThreadPoolExecutor(max_workers=4)
+
+class VideoCapture:
+    def __init__(self, name):
+        self.cap = cv2.VideoCapture(name)
+        self.lock = threading.Lock()
+        executor.submit(self._reader)
+
+    # grab frames as soon as they are available
+    def _reader(self):
+        try:
+            while True:
+                with self.lock:
+                    ret = self.cap.grab()
+                if not ret:
+                    break
+        finally:
+            print('reader thread closed')
+
+    # retrieve latest frame
+    def read(self):
+        print('START READ FRAME')
+        with self.lock:
+            ret, frame = self.cap.retrieve()
+        print('END READ FRAME')
+        return (ret, frame)
+    
+    def release(self):
+        self.cap.release()
 
 async def process_video_stream(client_id, ws_client: WsClient):
-    cap = cv2.VideoCapture(ws_client.stream_url)
+    cap = VideoCapture(ws_client.stream_url)
     loop = asyncio.get_running_loop()
     try:
         while True:
+            print('start')
             ret, frame = await loop.run_in_executor(executor, cap.read)
             if not ret:
+                print('RESTART')
+                cap = VideoCapture(ws_client.stream_url)
                 continue
-            
+            print(frame.shape)
             result = await loop.run_in_executor(executor, predict_frame, frame, ws_client.confidence, ws_client.parking_spaces)
+            print(result)
             await ws_client.ws.send_text(json.dumps(result))
-    except Exception as e:
-        print(e)
+    finally:
+        print('finally')
         cap.release()
+
 
 @app.websocket("/predict_stream")
 async def predict_stream(websocket: WebSocket):
@@ -92,10 +126,11 @@ async def predict_stream(websocket: WebSocket):
             connections[client_id].confidence = data['confidence']
 
             if connections[client_id].task and not connections[client_id].task.done():
-                connections[client_id].task.cancel()
-                await connections[client_id].task 
+                canceled = connections[client_id].task.cancel()
+                print(f'CANCELED {canceled}')
             connections[client_id].task = asyncio.create_task(process_video_stream(client_id, connections[client_id]))
     except WebSocketDisconnect:
         if connections[client_id].task:
-            connections[client_id].task.cancel()
+            canceled = connections[client_id].task.cancel()
+            print(f'CANCELED {canceled}')
         del connections[client_id]

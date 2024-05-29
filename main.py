@@ -70,23 +70,16 @@ class VideoCapture:
         self.lock = threading.Lock()
         executor.submit(self._reader)
 
-    # grab frames as soon as they are available
     def _reader(self):
-        try:
-            while True:
-                with self.lock:
-                    ret = self.cap.grab()
-                if not ret:
-                    break
-        finally:
-            print('reader thread closed')
+        while True:
+            with self.lock:
+                ret = self.cap.grab()
+            if not ret:
+                break
 
-    # retrieve latest frame
     def read(self):
-        print('START READ FRAME')
         with self.lock:
             ret, frame = self.cap.retrieve()
-        print('END READ FRAME')
         return (ret, frame)
     
     def release(self):
@@ -97,18 +90,13 @@ async def process_video_stream(client_id, ws_client: WsClient):
     loop = asyncio.get_running_loop()
     try:
         while True:
-            print('start')
             ret, frame = await loop.run_in_executor(executor, cap.read)
             if not ret:
-                print('RESTART')
                 cap = VideoCapture(ws_client.stream_url)
                 continue
-            print(frame.shape)
             result = await loop.run_in_executor(executor, predict_frame, frame, ws_client.confidence, ws_client.parking_spaces)
-            print(result)
             await ws_client.ws.send_text(json.dumps(result))
     finally:
-        print('finally')
         cap.release()
 
 
@@ -127,10 +115,8 @@ async def predict_stream(websocket: WebSocket):
 
             if connections[client_id].task and not connections[client_id].task.done():
                 canceled = connections[client_id].task.cancel()
-                print(f'CANCELED {canceled}')
             connections[client_id].task = asyncio.create_task(process_video_stream(client_id, connections[client_id]))
     except WebSocketDisconnect:
         if connections[client_id].task:
             canceled = connections[client_id].task.cancel()
-            print(f'CANCELED {canceled}')
         del connections[client_id]
